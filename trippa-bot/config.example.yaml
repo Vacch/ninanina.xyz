@@ -7,17 +7,20 @@ booking:
   url: "https://www.trippamilano.it/prenota-un-tavolo/"
   party_size: 2
 
-  # Slots to try, in priority order. The bot tries the first one; if it's
-  # not available it moves to the next. Use real calendar dates (the site
-  # only shows a limited window ahead, so pick dates that will plausibly
-  # be open on the day this runs).
-  preferred_slots:
-    - date: "2026-09-15"
-      time: "20:00"
-    - date: "2026-09-15"
-      time: "20:30"
-    - date: "2026-09-16"
-      time: "20:00"
+  # The site uses a rolling window: every midnight, exactly one new date
+  # unlocks - the day that is this many days ahead. 28 is what you observed;
+  # change it here if that ever turns out to be off by one or the site
+  # changes its policy.
+  target_offset_days: 28
+
+  # Times to try for that single newly-unlocked date, in priority order.
+  # The bot tries the first one; if it's taken (or was never offered - not
+  # every time slot exists every day) it moves to the next.
+  preferred_times:
+    - "20:00"
+    - "20:30"
+    - "19:30"
+    - "21:00"
 
 contact:
   first_name: "Stefano"
@@ -27,13 +30,7 @@ contact:
   notes: ""
 
 schedule:
-  # "monthly_first_day": fires once, at the given hour/minute/second on the
-  #   1st of every month (this matches what you told me: "reservations
-  #   unlock every midnight of the 1st").
-  # "daily": fires every day at the given time, in case it turns out the
-  #   site instead opens a new date each night on a rolling window. Switch
-  #   to this if monthly_first_day doesn't line up with what you observe.
-  mode: "monthly_first_day"
+  # The window rolls over every night at this time.
   hour: 0
   minute: 0
   second: 0

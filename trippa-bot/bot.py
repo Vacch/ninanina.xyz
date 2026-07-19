@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Reservation bot for Trippa (Milano).
 
-Waits for the moment reservations unlock, then tries a prioritized list of
-date/time slots until one is booked, and emails the outcome.
+Trippa uses a rolling booking window: every night at midnight, exactly one
+new date becomes bookable - the day that is `target_offset_days` (28) days
+ahead. This bot wakes up right before each midnight, and the instant the
+window rolls over, tries a prioritized list of times for that single new
+date until one is booked, then emails the outcome.
 
 IMPORTANT - calibration required before real use:
 This script was written without live access to trippamilano.it's booking
@@ -28,8 +31,7 @@ import os
 import smtplib
 import sys
 import time
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -60,12 +62,6 @@ SELECTORS = {
 # ------------------------------------------------------------------------
 
 
-@dataclass
-class Slot:
-    date: str  # YYYY-MM-DD
-    time: str  # HH:MM
-
-
 def load_config() -> dict:
     if not CONFIG_PATH.exists():
         sys.exit(
@@ -77,26 +73,20 @@ def load_config() -> dict:
 
 
 def compute_target_datetime(schedule: dict, now: datetime) -> datetime:
-    tz = now.tzinfo
-    hour, minute, second = schedule["hour"], schedule["minute"], schedule["second"]
+    """The next midnight (or configured hour/minute/second) at which the
+    window rolls over and a new date unlocks."""
+    target = now.replace(
+        hour=schedule["hour"], minute=schedule["minute"], second=schedule["second"], microsecond=0
+    )
+    if target <= now:
+        target += timedelta(days=1)
+    return target
 
-    if schedule["mode"] == "daily":
-        target = now.replace(hour=hour, minute=minute, second=second, microsecond=0)
-        if target <= now:
-            target += timedelta(days=1)
-        return target
 
-    if schedule["mode"] == "monthly_first_day":
-        candidate = now.replace(day=1, hour=hour, minute=minute, second=second, microsecond=0)
-        if candidate <= now:
-            # move to the 1st of next month
-            if now.month == 12:
-                candidate = candidate.replace(year=now.year + 1, month=1)
-            else:
-                candidate = candidate.replace(month=now.month + 1)
-        return candidate
-
-    raise ValueError(f"Unknown schedule mode: {schedule['mode']}")
+def compute_unlock_date(target: datetime, offset_days: int) -> date:
+    """The single date that becomes bookable at `target` (the midnight it
+    rolls over to, plus the rolling window length)."""
+    return target.date() + timedelta(days=offset_days)
 
 
 def sleep_until(target: datetime):
@@ -118,9 +108,10 @@ def dismiss_cookie_banner(page: Page):
             continue
 
 
-def try_slot(page: Page, slot: Slot, party_size: int) -> bool:
-    """Attempt to select one candidate slot. Returns True if it looks selected."""
-    day = str(int(slot.date.split("-")[2]))  # e.g. "15" -> "15", strip leading zero
+def select_date(page: Page, target_date: date, party_size: int) -> bool:
+    """Select party size and the single newly-unlocked date. Returns True if
+    the date looks selected."""
+    day = str(target_date.day)  # e.g. 15, no leading zero
 
     try:
         page.select_option(SELECTORS["party_size_select"], value=str(party_size), timeout=3000)
@@ -129,17 +120,19 @@ def try_slot(page: Page, slot: Slot, party_size: int) -> bool:
 
     try:
         page.locator(SELECTORS["date_button"].format(day=day)).first.click(timeout=4000)
+        return True
     except PlaywrightTimeoutError:
-        print(f"  date {slot.date} not clickable/found")
+        print(f"  date {target_date.isoformat()} not clickable/found - window may not have rolled over yet")
         return False
 
+
+def try_time(page: Page, time_str: str) -> bool:
     try:
-        page.locator(SELECTORS["time_slot_button"].format(time=slot.time)).first.click(timeout=4000)
+        page.locator(SELECTORS["time_slot_button"].format(time=time_str)).first.click(timeout=4000)
+        return True
     except PlaywrightTimeoutError:
-        print(f"  time {slot.time} not available for {slot.date}")
+        print(f"  time {time_str} not available")
         return False
-
-    return True
 
 
 def fill_contact_details(page: Page, contact: dict):
@@ -159,33 +152,39 @@ def fill_contact_details(page: Page, contact: dict):
             pass
 
 
-def attempt_booking(page: Page, config: dict, dry_run: bool) -> tuple[bool, str]:
+def attempt_booking(page: Page, config: dict, target_date: date, dry_run: bool) -> tuple[bool, str]:
     page.goto(config["booking"]["url"], wait_until="domcontentloaded")
     dismiss_cookie_banner(page)
 
-    slots = [Slot(s["date"], s["time"]) for s in config["booking"]["preferred_slots"]]
     party_size = config["booking"]["party_size"]
 
-    for slot in slots:
-        print(f"Trying {slot.date} {slot.time} ...")
-        if try_slot(page, slot, party_size):
+    if not select_date(page, target_date, party_size):
+        page.screenshot(path=str(SCREENSHOT_PATH))
+        return False, f"{target_date.isoformat()} is not open for booking yet."
+
+    for time_str in config["booking"]["preferred_times"]:
+        print(f"Trying {target_date.isoformat()} {time_str} ...")
+        if try_time(page, time_str):
             fill_contact_details(page, config["contact"])
 
             if dry_run:
                 page.screenshot(path=str(SCREENSHOT_PATH))
-                return True, f"DRY RUN: reached submit step for {slot.date} {slot.time}, did not submit."
+                return True, f"DRY RUN: reached submit step for {target_date.isoformat()} {time_str}, did not submit."
 
             try:
                 page.locator(SELECTORS["submit_button"]).first.click(timeout=5000)
                 page.locator(SELECTORS["confirmation_text"]).first.wait_for(timeout=8000)
                 page.screenshot(path=str(SCREENSHOT_PATH))
-                return True, f"Booked {slot.date} {slot.time} for {party_size} people."
+                return True, f"Booked {target_date.isoformat()} {time_str} for {party_size} people."
             except PlaywrightTimeoutError:
                 page.screenshot(path=str(SCREENSHOT_PATH))
-                return False, f"Submitted for {slot.date} {slot.time} but no confirmation seen - check manually."
+                return False, (
+                    f"Submitted for {target_date.isoformat()} {time_str} but no confirmation seen - "
+                    "check manually."
+                )
 
     page.screenshot(path=str(SCREENSHOT_PATH))
-    return False, "None of the preferred slots were available."
+    return False, f"None of the preferred times were available on {target_date.isoformat()}."
 
 
 def send_email(config: dict, subject: str, body: str, attachment: Path | None):
@@ -215,12 +214,12 @@ def send_email(config: dict, subject: str, body: str, attachment: Path | None):
         server.send_message(msg)
 
 
-def run_once(config: dict, dry_run: bool, headless: bool) -> tuple[bool, str]:
+def run_once(config: dict, target_date: date, dry_run: bool, headless: bool) -> tuple[bool, str]:
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
         page = browser.new_page()
         try:
-            success, message = attempt_booking(page, config, dry_run)
+            success, message = attempt_booking(page, config, target_date, dry_run)
         finally:
             browser.close()
     return success, message
@@ -232,8 +231,9 @@ def cmd_run(args):
     schedule = config["schedule"]
 
     target = compute_target_datetime(schedule, datetime.now(tz))
+    target_date = compute_unlock_date(target, config["booking"]["target_offset_days"])
     prewarm_at = target - timedelta(seconds=schedule["prewarm_seconds_before"])
-    print(f"Next target: {target.isoformat()}")
+    print(f"Next rollover: {target.isoformat()}, unlocking {target_date.isoformat()}")
 
     print(f"Sleeping until prewarm time {prewarm_at.isoformat()}")
     sleep_until(prewarm_at)
@@ -250,7 +250,7 @@ def cmd_run(args):
         deadline = time.monotonic() + schedule["retry_window_seconds"]
         success, message = False, "No attempt made."
         while time.monotonic() < deadline:
-            success, message = attempt_booking(page, config, dry_run=False)
+            success, message = attempt_booking(page, config, target_date, dry_run=False)
             if success:
                 break
             print(f"Retry: {message}")
@@ -267,7 +267,17 @@ def cmd_run(args):
 
 def cmd_attempt(args):
     config = load_config()
-    success, message = run_once(config, dry_run=args.dry_run, headless=not args.headed)
+    tz = ZoneInfo(config["timezone"])
+
+    if args.date:
+        target_date = date.fromisoformat(args.date)
+    else:
+        # An already-open date (yesterday's rollover), handy for testing the
+        # flow without waiting for an actual midnight.
+        offset = config["booking"]["target_offset_days"]
+        target_date = datetime.now(tz).date() + timedelta(days=offset - 1)
+
+    success, message = run_once(config, target_date, dry_run=args.dry_run, headless=not args.headed)
     print(message)
     if not args.dry_run:
         subject = "Trippa booking: SUCCESS" if success else "Trippa booking: FAILED"
@@ -295,6 +305,11 @@ def main():
     p_attempt = sub.add_parser("attempt", help="Attempt right now (for testing/calibration).")
     p_attempt.add_argument("--dry-run", action="store_true", help="Stop before the final submit click.")
     p_attempt.add_argument("--headed", action="store_true", help="Show the browser window.")
+    p_attempt.add_argument(
+        "--date",
+        help="Target date YYYY-MM-DD to test against (defaults to the last date already open "
+        "in the current window, so you can test without waiting for midnight).",
+    )
 
     sub.add_parser("inspect", help="Open a headed browser + Playwright Inspector to find real selectors.")
 

@@ -2,9 +2,11 @@
 
 A personal reservation bot for [Trippa](https://www.trippamilano.it/), the
 trattoria in Milan where tables famously get booked in seconds after
-reservations unlock. It waits for the unlock moment, then works through a
-priority list of date/time slots you configure until one is booked, and
-emails you the result.
+reservations unlock. Trippa uses a rolling window: every night at midnight,
+exactly one new date becomes bookable — the day `target_offset_days` (28)
+days ahead. The bot wakes up right before each midnight, and the instant the
+window rolls over, works through a priority list of times for that one new
+date until one is booked, then emails you the result.
 
 ## Before you rely on this: calibrate it
 
@@ -34,16 +36,14 @@ Repeat until this reliably reaches "ready to submit" for a slot that's
 actually available on the site right now. Only then trust `python bot.py run`
 for the real thing.
 
-## Also confirm the unlock rule
+## Unlock rule
 
-You said reservations unlock at midnight on the 1st of the month
-(`schedule.mode: monthly_first_day` in the config, which is the default).
-Search results turned up conflicting descriptions of Trippa's current
-system — some describing that monthly unlock, others describing a rolling
-28-day window that opens one new day every night. Check the current rule
-directly on [trippamilano.it/prenota-un-tavolo](https://www.trippamilano.it/prenota-un-tavolo/)
-before the first real run, and switch `schedule.mode` to `daily` in
-`config.yaml` if it turns out to be the rolling-window model instead.
+Confirmed: it's the rolling 28-day window, not a once-a-month release. Every
+midnight, the day 28 days out flips from unbookable to bookable; that's the
+only date worth trying on any given night, since everything closer in has
+already been fought over on previous nights. `booking.target_offset_days`
+in the config controls this — bump it if it ever turns out to be off by one,
+or if the site changes the window length.
 
 ## Setup
 
@@ -54,7 +54,7 @@ pip install -r requirements.txt
 playwright install chromium
 
 cp config.example.yaml config.yaml
-# edit config.yaml with your real details and preferred slots
+# edit config.yaml with your real details and preferred times
 ```
 
 For email notifications, create a [Gmail app password](https://myaccount.google.com/apppasswords)
@@ -68,28 +68,26 @@ export TRIPPA_BOT_SMTP_PASSWORD="your-16-char-app-password"
 ## Usage
 
 ```bash
-python bot.py inspect             # find real selectors (see above)
-python bot.py attempt --dry-run   # test the flow without submitting
-python bot.py attempt             # attempt a real booking right now
-python bot.py run                 # wait for the unlock moment, then attempt
+python bot.py inspect                    # find real selectors (see above)
+python bot.py attempt --dry-run          # test against an already-open date, without submitting
+python bot.py attempt --date 2026-08-20  # test/attempt against a specific date
+python bot.py run                        # wait for tonight's rollover, then attempt
 ```
 
-`run` sleeps until `schedule.prewarm_seconds_before` seconds before the
-target time, loads the page so it's warm, then busy-waits with sub-second
-precision until the exact target instant before trying anything. If the
-preferred slots aren't available yet, it retries every
-`schedule.retry_interval_seconds` for up to `schedule.retry_window_seconds`.
+`run` computes tonight's target date (today + `target_offset_days`), sleeps
+until `schedule.prewarm_seconds_before` seconds before midnight, loads the
+page so it's warm, then busy-waits with sub-second precision until the exact
+target instant before trying anything. If none of the preferred times are
+available yet, it retries every `schedule.retry_interval_seconds` for up to
+`schedule.retry_window_seconds`.
 
 ## Running it unattended
 
-You chose to run this locally rather than on a schedule you don't control
-(e.g. GitHub Actions), since precise timing matters here and cron-based CI
-schedulers can lag by several minutes — especially right at midnight on the
-1st, when lots of other scheduled jobs fire at once. Options on your own
+Since this needs to fire every single night, schedule `run` once and let it
+repeat — don't run it continuously in a loop. Options on your own
 machine/server:
 
-**cron** (add a couple of minutes before the target time so `run` is
-already prewarming when the clock hits the target):
+**cron:**
 
 ```
 55 23 * * * cd /path/to/trippa-bot && /path/to/venv/bin/python bot.py run >> run.log 2>&1
@@ -113,10 +111,10 @@ ExecStart=/path/to/venv/bin/python bot.py run
 ```ini
 # /etc/systemd/system/trippa-bot.timer
 [Unit]
-Description=Run trippa-bot a bit before each month's unlock
+Description=Run trippa-bot a bit before every midnight rollover
 
 [Timer]
-OnCalendar=*-*-01 23:55:00
+OnCalendar=*-*-* 23:55:00
 Persistent=true
 
 [Install]
