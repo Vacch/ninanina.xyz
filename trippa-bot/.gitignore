@@ -1,0 +1,5 @@
+config.yaml
+last_attempt.png
+.env
+__pycache__/
+venv/

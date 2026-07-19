@@ -1,0 +1,60 @@
+# Copy this file to config.yaml and fill in your real data.
+# config.yaml is gitignored so your personal details never get committed.
+
+timezone: "Europe/Rome"
+
+booking:
+  url: "https://www.trippamilano.it/prenota-un-tavolo/"
+  party_size: 2
+
+  # Slots to try, in priority order. The bot tries the first one; if it's
+  # not available it moves to the next. Use real calendar dates (the site
+  # only shows a limited window ahead, so pick dates that will plausibly
+  # be open on the day this runs).
+  preferred_slots:
+    - date: "2026-09-15"
+      time: "20:00"
+    - date: "2026-09-15"
+      time: "20:30"
+    - date: "2026-09-16"
+      time: "20:00"
+
+contact:
+  first_name: "Stefano"
+  last_name: "Vacchelli"
+  email: "vacchelli.stefano@gmail.com"
+  phone: "+39"
+  notes: ""
+
+schedule:
+  # "monthly_first_day": fires once, at the given hour/minute/second on the
+  #   1st of every month (this matches what you told me: "reservations
+  #   unlock every midnight of the 1st").
+  # "daily": fires every day at the given time, in case it turns out the
+  #   site instead opens a new date each night on a rolling window. Switch
+  #   to this if monthly_first_day doesn't line up with what you observe.
+  mode: "monthly_first_day"
+  hour: 0
+  minute: 0
+  second: 0
+
+  # Load the page this many seconds *before* the target time so it's warm
+  # and logged in/ready, then busy-wait precisely until the target instant
+  # before touching anything.
+  prewarm_seconds_before: 30
+
+  # After the target instant, keep retrying for this long in case the
+  # widget lags behind the clock (e.g. slots appear a few seconds late).
+  retry_window_seconds: 90
+  retry_interval_seconds: 2
+
+notifications:
+  enabled: true
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 587
+  smtp_user: "youraddress@gmail.com"
+  # Name of an environment variable holding a Gmail *app password*
+  # (https://myaccount.google.com/apppasswords) - never put the password
+  # in this file.
+  smtp_password_env: "TRIPPA_BOT_SMTP_PASSWORD"
+  to: "vacchelli.stefano@gmail.com"
