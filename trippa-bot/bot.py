@@ -39,6 +39,8 @@ from zoneinfo import ZoneInfo
 import yaml
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
+import resdiary
+
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
 SCREENSHOT_PATH = Path(__file__).parent / "last_attempt.png"
 WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -140,8 +142,22 @@ def try_time(page: Page, time_str: str) -> bool:
         page.locator(SELECTORS["time_slot_button"].format(time=time_str)).first.click(timeout=4000)
         return True
     except PlaywrightTimeoutError:
-        print(f"  time {time_str} not available")
+        print(f"  time {time_str} not available in the widget")
         return False
+
+
+def pick_available_time(config: dict, target_date: date) -> str | None:
+    """Ask Trippa's real booking API (see resdiary.py) which of our
+    preferred times are actually open for target_date, instead of
+    click-testing each one blindly in the browser."""
+    booking = config["booking"]
+    channel_code = booking.get("channel_code", "INGLESE")
+    live_times = resdiary.available_times(target_date.isoformat(), booking["party_size"], channel_code)
+    print(f"  API live availability for {target_date.isoformat()}: {live_times or 'none'}")
+    for time_str in booking["preferred_times"]:
+        if time_str in live_times:
+            return time_str
+    return None
 
 
 def fill_contact_details(page: Page, contact: dict):
@@ -162,38 +178,41 @@ def fill_contact_details(page: Page, contact: dict):
 
 
 def attempt_booking(page: Page, config: dict, target_date: date, dry_run: bool) -> tuple[bool, str]:
+    party_size = config["booking"]["party_size"]
+
+    time_str = pick_available_time(config, target_date)
+    if time_str is None:
+        return False, f"None of the preferred times were available on {target_date.isoformat()} (checked via API)."
+
     page.goto(config["booking"]["url"], wait_until="domcontentloaded")
     dismiss_cookie_banner(page)
 
-    party_size = config["booking"]["party_size"]
-
     if not select_date(page, target_date, party_size):
         page.screenshot(path=str(SCREENSHOT_PATH))
-        return False, f"{target_date.isoformat()} is not open for booking yet."
+        return False, f"API said {target_date.isoformat()} was open but the widget wouldn't select that date."
 
-    for time_str in config["booking"]["preferred_times"]:
-        print(f"Trying {target_date.isoformat()} {time_str} ...")
-        if try_time(page, time_str):
-            fill_contact_details(page, config["contact"])
+    print(f"Trying {target_date.isoformat()} {time_str} ...")
+    if not try_time(page, time_str):
+        page.screenshot(path=str(SCREENSHOT_PATH))
+        return False, (
+            f"API said {time_str} was open on {target_date.isoformat()} but the widget wouldn't select "
+            "it - selectors may need recalibration, or someone else took it first."
+        )
 
-            if dry_run:
-                page.screenshot(path=str(SCREENSHOT_PATH))
-                return True, f"DRY RUN: reached submit step for {target_date.isoformat()} {time_str}, did not submit."
+    fill_contact_details(page, config["contact"])
 
-            try:
-                page.locator(SELECTORS["submit_button"]).first.click(timeout=5000)
-                page.locator(SELECTORS["confirmation_text"]).first.wait_for(timeout=8000)
-                page.screenshot(path=str(SCREENSHOT_PATH))
-                return True, f"Booked {target_date.isoformat()} {time_str} for {party_size} people."
-            except PlaywrightTimeoutError:
-                page.screenshot(path=str(SCREENSHOT_PATH))
-                return False, (
-                    f"Submitted for {target_date.isoformat()} {time_str} but no confirmation seen - "
-                    "check manually."
-                )
+    if dry_run:
+        page.screenshot(path=str(SCREENSHOT_PATH))
+        return True, f"DRY RUN: reached submit step for {target_date.isoformat()} {time_str}, did not submit."
 
-    page.screenshot(path=str(SCREENSHOT_PATH))
-    return False, f"None of the preferred times were available on {target_date.isoformat()}."
+    try:
+        page.locator(SELECTORS["submit_button"]).first.click(timeout=5000)
+        page.locator(SELECTORS["confirmation_text"]).first.wait_for(timeout=8000)
+        page.screenshot(path=str(SCREENSHOT_PATH))
+        return True, f"Booked {target_date.isoformat()} {time_str} for {party_size} people."
+    except PlaywrightTimeoutError:
+        page.screenshot(path=str(SCREENSHOT_PATH))
+        return False, f"Submitted for {target_date.isoformat()} {time_str} but no confirmation seen - check manually."
 
 
 def send_email(config: dict, subject: str, body: str, attachment: Path | None):
@@ -271,8 +290,6 @@ def cmd_run(args):
                 break
             print(f"Retry: {message}")
             time.sleep(schedule["retry_interval_seconds"])
-            page.goto(config["booking"]["url"], wait_until="domcontentloaded")
-            dismiss_cookie_banner(page)
 
         browser.close()
 
@@ -319,6 +336,37 @@ def cmd_check(args):
         print(f"{rollover.date().isoformat()} midnight -> unlocks {target_date.isoformat()} ({weekday}): {status}")
 
 
+def cmd_availability(args):
+    """Query Trippa's real booking API directly - no browser needed. Handy
+    to sanity-check resdiary.py, or to peek at the standby/waitlist dates
+    that are open right now."""
+    config = load_config()
+    party_size = config["booking"]["party_size"]
+    channel_code = config["booking"].get("channel_code", "INGLESE")
+
+    if args.standby:
+        date_from = args.date or date.today().isoformat()
+        date_to = args.date_to or (date.fromisoformat(date_from) + timedelta(days=30)).isoformat()
+        results = resdiary.standby_dates_in_range(date_from, date_to, party_size, channel_code)
+        label = "standby/waitlist"
+    elif args.date_to:
+        date_from = args.date or date.today().isoformat()
+        results = resdiary.available_dates_in_range(date_from, args.date_to, party_size, channel_code)
+        label = "reservation"
+    else:
+        target = args.date or date.today().isoformat()
+        times = resdiary.available_times(target, party_size, channel_code)
+        results = {target: times}
+        label = "reservation"
+
+    if not any(results.values()):
+        print(f"No {label} availability found for the given range.")
+        return
+    for d, times in sorted(results.items()):
+        if times:
+            print(f"{d} ({label}): {', '.join(times)}")
+
+
 def cmd_inspect(args):
     config = load_config()
     with sync_playwright() as p:
@@ -353,8 +401,21 @@ def main():
     )
     p_check.add_argument("--nights", type=int, default=7, help="How many upcoming nights to preview.")
 
+    p_avail = sub.add_parser(
+        "availability", help="Query the real booking API directly (no browser) for open dates/times."
+    )
+    p_avail.add_argument("--date", help="Date YYYY-MM-DD to check (defaults to today).")
+    p_avail.add_argument("--date-to", help="End of range YYYY-MM-DD, for a multi-day look.")
+    p_avail.add_argument("--standby", action="store_true", help="Check the waitlist instead of direct reservations.")
+
     args = parser.parse_args()
-    {"run": cmd_run, "attempt": cmd_attempt, "inspect": cmd_inspect, "check": cmd_check}[args.command](args)
+    {
+        "run": cmd_run,
+        "attempt": cmd_attempt,
+        "inspect": cmd_inspect,
+        "check": cmd_check,
+        "availability": cmd_availability,
+    }[args.command](args)
 
 
 if __name__ == "__main__":

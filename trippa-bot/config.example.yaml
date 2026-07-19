@@ -14,13 +14,19 @@ booking:
   target_offset_days: 28
 
   # Times to try for that single newly-unlocked date, in priority order.
-  # The bot tries the first one; if it's taken (or was never offered - not
-  # every time slot exists every day) it moves to the next.
+  # The bot asks the real booking API which of these are actually open and
+  # goes for the first match. 19:15 (first turn) and 21:45 (second turn)
+  # are the two dinner slots seen in a real capture - adjust to taste.
   preferred_times:
-    - "20:00"
-    - "20:30"
-    - "19:30"
-    - "21:00"
+    - "19:15"
+    - "21:45"
+
+  # Captured from a real request while browsing with English as the
+  # preferred browser language ("INGLESE" = Italian for "English"). This
+  # might mean Trippa allocates a separate channel/quota per site language -
+  # if you normally book in Italian, capture a HAR with Italian as the
+  # primary Accept-Language and check whether ChannelCode differs there.
+  channel_code: "INGLESE"
 
   # Weekdays Trippa is closed (currently Saturday and Sunday, per their
   # website). When the night's rollover would unlock a closed day, `run`

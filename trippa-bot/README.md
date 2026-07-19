@@ -8,10 +8,41 @@ days ahead. The bot wakes up right before each midnight, and the instant the
 window rolls over, works through a priority list of times for that one new
 date until one is booked, then emails you the result.
 
-## Before you rely on this: calibrate it
+## The real booking API
 
-This was built without live access to trippamilano.it's booking widget, so
-the CSS/text selectors in `SELECTORS` at the top of `bot.py` are best-effort
+Thanks to a HAR capture, `resdiary.py` now talks directly to Trippa's actual
+booking API (`booking.resdiary.com`, restaurant code `TRATTORIATRIPPA`) - no
+login needed, it's the same public JSON API the browser widget itself calls.
+This means checking availability no longer depends on clicking through the
+DOM at all:
+
+```bash
+python bot.py availability --date 2026-07-27              # a single date
+python bot.py availability --date-to 2026-08-20            # today .. that date, range
+python bot.py availability --date 2026-07-20 --standby     # the waitlist instead
+```
+
+`bot.py` uses this internally too: before touching the browser at all, it
+asks the API which of your `preferred_times` are actually open for the
+target date, and only drives Playwright to click through that one specific,
+already-confirmed-available slot - instead of blindly clicking each
+preferred time in turn and hoping.
+
+**Caveat on `channel_code`:** the capture was made with English as the
+browser's preferred language, and the channel came back as `"INGLESE"`
+(Italian for "English"). That suggests Trippa may split availability by
+site language. If you normally book in Italian, capture one more HAR with
+Italian as the primary `Accept-Language` and check whether `ChannelCode`
+differs there - if so, set `booking.channel_code` in `config.yaml` to match,
+otherwise you may be checking (or booking into) the wrong pool of tables.
+
+There's no captured request yet for actually *creating* a booking (only for
+checking availability), so submitting the reservation still goes through a
+real browser via Playwright.
+
+## Before you rely on this: calibrate the browser step
+
+The CSS/text selectors in `SELECTORS` at the top of `bot.py` are best-effort
 guesses at a typical booking-widget layout — **not verified against the real
 page**. Treat the first run as a calibration step, not a real booking
 attempt:
