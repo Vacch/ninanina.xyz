@@ -167,12 +167,12 @@ def fill_contact_details(page: Page, contact: dict):
         pass  # some widgets go straight to the details form
 
     page.locator(SELECTORS["first_name_field"]).first.fill(contact["first_name"])
-    page.locator(SELECTORS["last_name_field"]).first.fill(contact["last_name"])
+    page.locator(SELECTORS["last_name_field"]).first.fill(contact["surname"])
     page.locator(SELECTORS["email_field"]).first.fill(contact["email"])
-    page.locator(SELECTORS["phone_field"]).first.fill(contact["phone"])
-    if contact.get("notes"):
+    page.locator(SELECTORS["phone_field"]).first.fill(contact["mobile"])
+    if contact.get("special_requests"):
         try:
-            page.locator(SELECTORS["notes_field"]).first.fill(contact["notes"])
+            page.locator(SELECTORS["notes_field"]).first.fill(contact["special_requests"])
         except Exception:
             pass
 
@@ -367,6 +367,29 @@ def cmd_availability(args):
             print(f"{d} ({label}): {', '.join(times)}")
 
 
+def cmd_standby(args):
+    """Join Trippa's real waitlist for a specific date/time via the
+    confirmed AddToStandbyList API - no browser needed. This creates a
+    real entry the restaurant will see, not a test."""
+    config = load_config()
+    channel_code = config["booking"].get("channel_code", "INGLESE")
+    party_size = config["booking"]["party_size"]
+    customer = resdiary.build_customer(config["contact"])
+
+    if not args.yes:
+        sys.exit(
+            f"This will really join the waitlist for {args.date} {args.time}, "
+            f"party of {party_size}. Re-run with --yes to confirm."
+        )
+
+    result = resdiary.add_to_standby_list(
+        args.date, args.time, party_size, channel_code, customer,
+        special_requests=config["contact"].get("special_requests", ""),
+    )
+    booking = result.get("Booking", {})
+    print(f"Status: {result.get('Status')}, reference: {booking.get('Reference')}, errors: {result.get('Errors')}")
+
+
 def cmd_inspect(args):
     config = load_config()
     with sync_playwright() as p:
@@ -408,6 +431,13 @@ def main():
     p_avail.add_argument("--date-to", help="End of range YYYY-MM-DD, for a multi-day look.")
     p_avail.add_argument("--standby", action="store_true", help="Check the waitlist instead of direct reservations.")
 
+    p_standby = sub.add_parser(
+        "standby", help="Join the real waitlist for a specific date/time (creates a real entry)."
+    )
+    p_standby.add_argument("--date", required=True, help="Date YYYY-MM-DD.")
+    p_standby.add_argument("--time", required=True, help="Time HH:MM.")
+    p_standby.add_argument("--yes", action="store_true", help="Confirm you want to really do this.")
+
     args = parser.parse_args()
     {
         "run": cmd_run,
@@ -415,6 +445,7 @@ def main():
         "inspect": cmd_inspect,
         "check": cmd_check,
         "availability": cmd_availability,
+        "standby": cmd_standby,
     }[args.command](args)
 
 

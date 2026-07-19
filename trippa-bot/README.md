@@ -36,9 +36,28 @@ Italian as the primary `Accept-Language` and check whether `ChannelCode`
 differs there - if so, set `booking.channel_code` in `config.yaml` to match,
 otherwise you may be checking (or booking into) the wrong pool of tables.
 
-There's no captured request yet for actually *creating* a booking (only for
-checking availability), so submitting the reservation still goes through a
-real browser via Playwright.
+**The waitlist call is now real and working**, confirmed from a live
+capture: `POST {BASE_URL}/AddToStandbyList` with a `Customer` object (see
+`resdiary.build_customer()`). This is wired up as its own command:
+
+```bash
+python bot.py standby --date 2026-07-27 --time 19:15 --yes
+```
+
+Note the `--yes` flag: unlike `availability`, this **is not read-only** -
+it creates a real waitlist entry the restaurant will see, the same as
+clicking through the site by hand. Only your `contact` details in
+`config.yaml` are used (no separate confirmation step), so double check
+`--date`/`--time` before adding `--yes`.
+
+There's still no captured request for creating a *confirmed* reservation
+(only for the waitlist and for checking availability), since nothing was
+open under the "Reservation" availability type at capture time. The
+payload is almost certainly the same `Customer` shape, just posted to a
+different, not-yet-observed endpoint - next time `availability` shows a
+real (non-standby) open slot, capture one more HAR of completing that
+booking so the final submit can skip Playwright entirely too. Until then,
+`run`/`attempt` still drive a real browser for the final step.
 
 ## Before you rely on this: calibrate the browser step
 

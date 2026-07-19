@@ -38,11 +38,15 @@ booking:
     - "Sunday"
 
 contact:
+  # Field names match exactly what Trippa's booking API expects (confirmed
+  # from a real AddToStandbyList capture), so this same section can feed
+  # both the waitlist call and, once captured, the real booking call.
   first_name: "Stefano"
-  last_name: "Vacchelli"
+  surname: "Vacchelli"
+  mobile_country_code: "39"
+  mobile: "3331234567"  # your number, digits only, no leading 0, no country code
   email: "vacchelli.stefano@gmail.com"
-  phone: "+39"
-  notes: ""
+  special_requests: ""
 
 schedule:
   # The window rolls over every night at this time.
