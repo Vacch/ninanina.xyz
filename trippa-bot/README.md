@@ -52,12 +52,35 @@ clicking through the site by hand. Only your `contact` details in
 
 There's still no captured request for creating a *confirmed* reservation
 (only for the waitlist and for checking availability), since nothing was
-open under the "Reservation" availability type at capture time. The
-payload is almost certainly the same `Customer` shape, just posted to a
-different, not-yet-observed endpoint - next time `availability` shows a
-real (non-standby) open slot, capture one more HAR of completing that
-booking so the final submit can skip Playwright entirely too. Until then,
-`run`/`attempt` still drive a real browser for the final step.
+open under the "Reservation" availability type at capture time - and it
+only ever opens for a few seconds right at midnight, which isn't always a
+time you can be at the computer with DevTools open.
+
+### Capturing it without being there: automatic HAR recording
+
+You don't need to manually run DevTools for this last capture. `run`,
+`attempt --har`, and `inspect` all launch the browser with Playwright's own
+network recorder turned on (`record_har_path`), writing a full HAR of
+everything that happens to `captures/`. So the plan for tonight is:
+
+1. Schedule `python bot.py run` as usual (see "Running it unattended"
+   below) and go to bed - you don't need to be at the keyboard.
+2. Whether it books successfully, fails, or only gets partway, the
+   complete network capture for that run is saved to `captures/` **and
+   emailed to you as an attachment** alongside the result.
+3. Send that HAR back over. If tonight's attempt reached the real submit
+   step (even if it then failed for an unrelated reason, e.g. a selector
+   being off), it'll contain the real booking-creation request, and the
+   bot can be switched to call it directly - no more Playwright/DOM
+   dependency for future nights, and much faster/more reliable at the
+   critical instant.
+
+This only works if the DOM automation gets far enough to actually click
+"submit" tonight, which depends on the CSS selectors below being right.
+Calibrating them in advance against the *waitlist* flow (which does have
+real open dates right now) won't guarantee the reservation flow's exact
+buttons match, but it's the best trial run available before midnight - see
+below.
 
 ## Before you rely on this: calibrate the browser step
 
@@ -71,7 +94,9 @@ python bot.py inspect
 ```
 
 This opens a visible browser on the real booking page and pauses with the
-Playwright Inspector. Click through an actual booking by hand, note the real
+Playwright Inspector (and records a HAR of everything you do, see above).
+Click through an actual booking by hand — right now that means the
+*waitlist* flow, since it's the one with real open dates — note the real
 selectors (right-click → Inspect on each date, time slot, and form field),
 and update the `SELECTORS` dict in `bot.py` to match.
 
@@ -79,7 +104,7 @@ Then verify the automated flow gets all the way to the final step without
 actually submitting:
 
 ```bash
-python bot.py attempt --dry-run --headed
+python bot.py attempt --dry-run --headed --har
 ```
 
 Repeat until this reliably reaches "ready to submit" for a slot that's
@@ -135,10 +160,12 @@ export TRIPPA_BOT_SMTP_PASSWORD="your-16-char-app-password"
 ## Usage
 
 ```bash
-python bot.py inspect                    # find real selectors (see above)
-python bot.py attempt --dry-run          # test against an already-open date, without submitting
-python bot.py attempt --date 2026-08-20  # test/attempt against a specific date
-python bot.py run                        # wait for tonight's rollover, then attempt
+python bot.py inspect                          # find real selectors, HAR always recorded
+python bot.py availability --date 2026-07-27   # check real availability, no browser
+python bot.py standby --date ... --time ... --yes  # really join the waitlist
+python bot.py attempt --dry-run --har          # test against an already-open date, without submitting
+python bot.py attempt --date 2026-08-20        # test/attempt against a specific date
+python bot.py run                              # wait for tonight's rollover, then attempt (always records a HAR)
 ```
 
 `run` computes tonight's target date (today + `target_offset_days`), sleeps
@@ -146,7 +173,9 @@ until `schedule.prewarm_seconds_before` seconds before midnight, loads the
 page so it's warm, then busy-waits with sub-second precision until the exact
 target instant before trying anything. If none of the preferred times are
 available yet, it retries every `schedule.retry_interval_seconds` for up to
-`schedule.retry_window_seconds`.
+`schedule.retry_window_seconds`. The whole session's network traffic is
+recorded to `captures/*.har` and emailed to you along with the result -
+see "Capturing it without being there" above.
 
 ## Running it unattended
 
@@ -207,3 +236,7 @@ difference between a table and nothing.
 - Automated booking may not be something the restaurant's booking platform
   explicitly endorses; use your own judgment about whether that's fine for
   an occasional personal booking.
+- HAR files in `captures/` (and the emails they get attached to) contain
+  your real name, email, and phone number once a booking form gets filled
+  in - they're already gitignored, but don't paste their contents anywhere
+  public either.

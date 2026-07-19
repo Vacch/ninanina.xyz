@@ -43,6 +43,7 @@ import resdiary
 
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
 SCREENSHOT_PATH = Path(__file__).parent / "last_attempt.png"
+HAR_DIR = Path(__file__).parent / "captures"
 WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
 # --- CALIBRATE ME -----------------------------------------------------
@@ -215,7 +216,7 @@ def attempt_booking(page: Page, config: dict, target_date: date, dry_run: bool) 
         return False, f"Submitted for {target_date.isoformat()} {time_str} but no confirmation seen - check manually."
 
 
-def send_email(config: dict, subject: str, body: str, attachment: Path | None):
+def send_email(config: dict, subject: str, body: str, attachments: list = None):
     notif = config["notifications"]
     if not notif.get("enabled", True):
         return
@@ -231,10 +232,11 @@ def send_email(config: dict, subject: str, body: str, attachment: Path | None):
     msg["To"] = notif["to"]
     msg.set_content(body)
 
-    if attachment and attachment.exists():
-        msg.add_attachment(
-            attachment.read_bytes(), maintype="image", subtype="png", filename=attachment.name
-        )
+    for attachment in attachments or []:
+        if not attachment or not attachment.exists():
+            continue
+        maintype, subtype = ("image", "png") if attachment.suffix == ".png" else ("application", "octet-stream")
+        msg.add_attachment(attachment.read_bytes(), maintype=maintype, subtype=subtype, filename=attachment.name)
 
     with smtplib.SMTP(notif["smtp_host"], notif["smtp_port"]) as server:
         server.starttls()
@@ -242,13 +244,17 @@ def send_email(config: dict, subject: str, body: str, attachment: Path | None):
         server.send_message(msg)
 
 
-def run_once(config: dict, target_date: date, dry_run: bool, headless: bool) -> tuple[bool, str]:
+def run_once(
+    config: dict, target_date: date, dry_run: bool, headless: bool, har_path: Path | None = None
+) -> tuple[bool, str]:
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
-        page = browser.new_page()
+        context = browser.new_context(record_har_path=str(har_path) if har_path else None)
+        page = context.new_page()
         try:
             success, message = attempt_booking(page, config, target_date, dry_run)
         finally:
+            context.close()  # flushes the HAR file, if recording
             browser.close()
     return success, message
 
@@ -266,17 +272,20 @@ def cmd_run(args):
     if reason:
         message = f"{reason} Nothing to book tonight - skipping."
         print(message)
-        send_email(config, "Trippa booking: closed that night, skipped", message, None)
+        send_email(config, "Trippa booking: closed that night, skipped", message)
         return
 
     prewarm_at = target - timedelta(seconds=schedule["prewarm_seconds_before"])
     print(f"Sleeping until prewarm time {prewarm_at.isoformat()}")
     sleep_until(prewarm_at)
 
-    print("Prewarming page ...")
+    HAR_DIR.mkdir(exist_ok=True)
+    har_path = HAR_DIR / f"{target_date.isoformat()}_{datetime.now(tz):%H%M%S}.har"
+    print(f"Prewarming page (recording full network traffic to {har_path}) ...")
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+        context = browser.new_context(record_har_path=str(har_path))
+        page = context.new_page()
         page.goto(config["booking"]["url"], wait_until="domcontentloaded")
         dismiss_cookie_banner(page)
 
@@ -291,11 +300,20 @@ def cmd_run(args):
             print(f"Retry: {message}")
             time.sleep(schedule["retry_interval_seconds"])
 
+        context.close()  # flushes har_path to disk
         browser.close()
+    print(f"Full network capture saved to {har_path} - send it over even if the attempt failed.")
 
     print(message)
     subject = "Trippa booking: SUCCESS" if success else "Trippa booking: FAILED"
-    send_email(config, subject, message, SCREENSHOT_PATH)
+    send_email(
+        config,
+        subject,
+        f"{message}\n\nFull network capture attached ({har_path.name}) - send it back over "
+        "if the booking step still needs work, it has everything needed to finish wiring up "
+        "the direct API call.",
+        [SCREENSHOT_PATH, har_path],
+    )
 
 
 def cmd_attempt(args):
@@ -310,11 +328,18 @@ def cmd_attempt(args):
         offset = config["booking"]["target_offset_days"]
         target_date = datetime.now(tz).date() + timedelta(days=offset - 1)
 
-    success, message = run_once(config, target_date, dry_run=args.dry_run, headless=not args.headed)
+    har_path = None
+    if args.har:
+        HAR_DIR.mkdir(exist_ok=True)
+        har_path = HAR_DIR / f"attempt_{target_date.isoformat()}_{datetime.now(tz):%H%M%S}.har"
+
+    success, message = run_once(config, target_date, dry_run=args.dry_run, headless=not args.headed, har_path=har_path)
     print(message)
+    if har_path:
+        print(f"Network capture saved to {har_path}")
     if not args.dry_run:
         subject = "Trippa booking: SUCCESS" if success else "Trippa booking: FAILED"
-        send_email(config, subject, message, SCREENSHOT_PATH)
+        send_email(config, subject, message, [SCREENSHOT_PATH, har_path])
 
 
 def cmd_check(args):
@@ -392,14 +417,20 @@ def cmd_standby(args):
 
 def cmd_inspect(args):
     config = load_config()
+    HAR_DIR.mkdir(exist_ok=True)
+    har_path = HAR_DIR / f"inspect_{datetime.now():%Y%m%d_%H%M%S}.har"
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
-        page = browser.new_page()
+        context = browser.new_context(record_har_path=str(har_path))
+        page = context.new_page()
         page.goto(config["booking"]["url"], wait_until="domcontentloaded")
         print("Playwright Inspector paused - click through a booking by hand,")
         print("note the real selectors, then update SELECTORS in bot.py.")
+        print(f"Everything you do is also being recorded to {har_path} - no need for manual DevTools HAR capture.")
         page.pause()
+        context.close()
         browser.close()
+    print(f"Network capture saved to {har_path}")
 
 
 def main():
@@ -416,6 +447,7 @@ def main():
         help="Target date YYYY-MM-DD to test against (defaults to the last date already open "
         "in the current window, so you can test without waiting for midnight).",
     )
+    p_attempt.add_argument("--har", action="store_true", help="Record the full network traffic to a HAR file.")
 
     sub.add_parser("inspect", help="Open a headed browser + Playwright Inspector to find real selectors.")
 
