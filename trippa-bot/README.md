@@ -45,6 +45,23 @@ already been fought over on previous nights. `booking.target_offset_days`
 in the config controls this — bump it if it ever turns out to be off by one,
 or if the site changes the window length.
 
+## Closed days
+
+Trippa is currently closed Saturday and Sunday (`booking.closed_weekdays` in
+the config). When a night's rollover would unlock a date that falls on a
+closed day, `run` skips the wait entirely — no point sitting up for a date
+nothing will ever be bookable on — and just emails you a heads-up instead.
+
+To see this in advance for the next several nights (e.g. to know today
+whether the date unlocking in 28 days will be a Saturday) run:
+
+```bash
+python bot.py check --nights 7
+```
+
+This lists, for each of the next 7 midnights, which date it would unlock
+and whether Trippa will be open that day.
+
 ## Setup
 
 ```bash

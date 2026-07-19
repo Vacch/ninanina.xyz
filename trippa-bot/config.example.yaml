@@ -22,6 +22,15 @@ booking:
     - "19:30"
     - "21:00"
 
+  # Weekdays Trippa is closed (currently Saturday and Sunday, per their
+  # website). When the night's rollover would unlock a closed day, `run`
+  # skips the wait entirely and just emails you a heads-up instead.
+  # Double-check this list still matches trippamilano.it - restaurants do
+  # change their closing days occasionally.
+  closed_weekdays:
+    - "Saturday"
+    - "Sunday"
+
 contact:
   first_name: "Stefano"
   last_name: "Vacchelli"

@@ -41,6 +41,7 @@ from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sy
 
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
 SCREENSHOT_PATH = Path(__file__).parent / "last_attempt.png"
+WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
 # --- CALIBRATE ME -----------------------------------------------------
 # Best-effort guesses at the widget's structure. Confirm/fix these with
@@ -87,6 +88,14 @@ def compute_unlock_date(target: datetime, offset_days: int) -> date:
     """The single date that becomes bookable at `target` (the midnight it
     rolls over to, plus the rolling window length)."""
     return target.date() + timedelta(days=offset_days)
+
+
+def closed_reason(target_date: date, closed_weekdays: list) -> str | None:
+    """None if the restaurant is open that day, otherwise why it's closed."""
+    weekday = WEEKDAY_NAMES[target_date.weekday()]
+    if weekday in closed_weekdays:
+        return f"{target_date.isoformat()} is a {weekday} - Trippa is closed that day."
+    return None
 
 
 def sleep_until(target: datetime):
@@ -232,9 +241,16 @@ def cmd_run(args):
 
     target = compute_target_datetime(schedule, datetime.now(tz))
     target_date = compute_unlock_date(target, config["booking"]["target_offset_days"])
-    prewarm_at = target - timedelta(seconds=schedule["prewarm_seconds_before"])
     print(f"Next rollover: {target.isoformat()}, unlocking {target_date.isoformat()}")
 
+    reason = closed_reason(target_date, config["booking"].get("closed_weekdays", []))
+    if reason:
+        message = f"{reason} Nothing to book tonight - skipping."
+        print(message)
+        send_email(config, "Trippa booking: closed that night, skipped", message, None)
+        return
+
+    prewarm_at = target - timedelta(seconds=schedule["prewarm_seconds_before"])
     print(f"Sleeping until prewarm time {prewarm_at.isoformat()}")
     sleep_until(prewarm_at)
 
@@ -284,6 +300,25 @@ def cmd_attempt(args):
         send_email(config, subject, message, SCREENSHOT_PATH)
 
 
+def cmd_check(args):
+    """Look ahead at which upcoming rollovers will unlock a date the
+    restaurant is actually open on, without waiting for anything."""
+    config = load_config()
+    tz = ZoneInfo(config["timezone"])
+    schedule = config["schedule"]
+    offset = config["booking"]["target_offset_days"]
+    closed_weekdays = config["booking"].get("closed_weekdays", [])
+
+    target = compute_target_datetime(schedule, datetime.now(tz))
+    for i in range(args.nights):
+        rollover = target + timedelta(days=i)
+        target_date = compute_unlock_date(rollover, offset)
+        reason = closed_reason(target_date, closed_weekdays)
+        weekday = WEEKDAY_NAMES[target_date.weekday()]
+        status = f"CLOSED ({reason})" if reason else "open - will be attempted"
+        print(f"{rollover.date().isoformat()} midnight -> unlocks {target_date.isoformat()} ({weekday}): {status}")
+
+
 def cmd_inspect(args):
     config = load_config()
     with sync_playwright() as p:
@@ -313,8 +348,13 @@ def main():
 
     sub.add_parser("inspect", help="Open a headed browser + Playwright Inspector to find real selectors.")
 
+    p_check = sub.add_parser(
+        "check", help="Look ahead: which of the next N rollovers will land on a closed day."
+    )
+    p_check.add_argument("--nights", type=int, default=7, help="How many upcoming nights to preview.")
+
     args = parser.parse_args()
-    {"run": cmd_run, "attempt": cmd_attempt, "inspect": cmd_inspect}[args.command](args)
+    {"run": cmd_run, "attempt": cmd_attempt, "inspect": cmd_inspect, "check": cmd_check}[args.command](args)
 
 
 if __name__ == "__main__":
