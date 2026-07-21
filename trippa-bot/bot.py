@@ -27,10 +27,12 @@ reselling or running at a scale that hammers the restaurant's booking
 system. Keep retry_window_seconds/retry_interval_seconds modest.
 """
 import argparse
+import contextlib
 import os
 import smtplib
 import sys
 import time
+import traceback
 from datetime import date, datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
@@ -44,7 +46,12 @@ import resdiary
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
 SCREENSHOT_PATH = Path(__file__).parent / "last_attempt.png"
 HAR_DIR = Path(__file__).parent / "captures"
+LOG_DIR = Path(__file__).parent / "logs"
 WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+# Set by log_session() while a command runs, so any function can attach the
+# current run's full log to whatever email it sends - see cmd_run et al.
+_current_log_path: Path | None = None
 
 # --- CALIBRATE ME -----------------------------------------------------
 # Best-effort guesses at the widget's structure. Confirm/fix these with
@@ -99,6 +106,50 @@ def closed_reason(target_date: date, closed_weekdays: list) -> str | None:
     if weekday in closed_weekdays:
         return f"{target_date.isoformat()} is a {weekday} - Trippa is closed that day."
     return None
+
+
+class _Tee:
+    """Writes everything to several streams at once - used to mirror
+    stdout/stderr into a log file while still printing to the terminal."""
+
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, data):
+        for stream in self._streams:
+            stream.write(data)
+            stream.flush()  # so the log file is readable (e.g. as an email attachment) mid-session
+        return len(data)
+
+    def flush(self):
+        for stream in self._streams:
+            stream.flush()
+
+
+@contextlib.contextmanager
+def log_session(command_name: str):
+    """Mirrors everything printed (and any traceback) during this command
+    into logs/<command>_<timestamp>.log, so a failed run can be uploaded
+    for debugging instead of just describing what happened from memory."""
+    global _current_log_path
+    LOG_DIR.mkdir(exist_ok=True)
+    log_path = LOG_DIR / f"{command_name}_{datetime.now():%Y%m%d_%H%M%S}.log"
+    log_file = open(log_path, "w", encoding="utf-8")
+    real_stdout, real_stderr = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = _Tee(real_stdout, log_file), _Tee(real_stderr, log_file)
+    _current_log_path = log_path
+    try:
+        yield log_path
+    except (SystemExit, KeyboardInterrupt):
+        raise  # deliberate exits, not bugs - no need for a scary traceback
+    except BaseException:
+        traceback.print_exc()
+        raise
+    finally:
+        sys.stdout, sys.stderr = real_stdout, real_stderr
+        log_file.close()
+        _current_log_path = None
+        print(f"Full log saved to {log_path} - upload it if something went wrong.")
 
 
 def sleep_until(target: datetime):
@@ -272,7 +323,7 @@ def cmd_run(args):
     if reason:
         message = f"{reason} Nothing to book tonight - skipping."
         print(message)
-        send_email(config, "Trippa booking: closed that night, skipped", message)
+        send_email(config, "Trippa booking: closed that night, skipped", message, [_current_log_path])
         return
 
     prewarm_at = target - timedelta(seconds=schedule["prewarm_seconds_before"])
@@ -309,10 +360,10 @@ def cmd_run(args):
     send_email(
         config,
         subject,
-        f"{message}\n\nFull network capture attached ({har_path.name}) - send it back over "
-        "if the booking step still needs work, it has everything needed to finish wiring up "
-        "the direct API call.",
-        [SCREENSHOT_PATH, har_path],
+        f"{message}\n\nFull network capture and log attached - send them back over "
+        "if the booking step still needs work, they have everything needed to finish wiring up "
+        "the direct API call or diagnose what went wrong.",
+        [SCREENSHOT_PATH, har_path, _current_log_path],
     )
 
 
@@ -339,7 +390,7 @@ def cmd_attempt(args):
         print(f"Network capture saved to {har_path}")
     if not args.dry_run:
         subject = "Trippa booking: SUCCESS" if success else "Trippa booking: FAILED"
-        send_email(config, subject, message, [SCREENSHOT_PATH, har_path])
+        send_email(config, subject, message, [SCREENSHOT_PATH, har_path, _current_log_path])
 
 
 def cmd_check(args):
@@ -407,12 +458,20 @@ def cmd_standby(args):
             f"party of {party_size}. Re-run with --yes to confirm."
         )
 
-    result = resdiary.add_to_standby_list(
-        args.date, args.time, party_size, channel_code, customer,
-        special_requests=config["contact"].get("special_requests", ""),
-    )
-    booking = result.get("Booking", {})
-    print(f"Status: {result.get('Status')}, reference: {booking.get('Reference')}, errors: {result.get('Errors')}")
+    try:
+        result = resdiary.add_to_standby_list(
+            args.date, args.time, party_size, channel_code, customer,
+            special_requests=config["contact"].get("special_requests", ""),
+        )
+        booking = result.get("Booking", {})
+        message = f"Status: {result.get('Status')}, reference: {booking.get('Reference')}, errors: {result.get('Errors')}"
+        subject = f"Trippa standby: {result.get('Status')}"
+    except Exception:
+        message = f"Standby request failed:\n{traceback.format_exc()}"
+        subject = "Trippa standby: FAILED"
+
+    print(message)
+    send_email(config, subject, message, [_current_log_path])
 
 
 def ask(prompt_text: str, default: str | None = None) -> str:
@@ -493,6 +552,7 @@ def cmd_interactive(args):
     print("3) Prova/esegui una prenotazione per una data già aperta (via browser)")
     print("4) Aspetta la mezzanotte di stanotte e prova a prenotare (come 'run')")
     choice = ask("\nScegli un'opzione", "1")
+    summary = None  # if set, emailed at the end with the full session log attached
 
     if choice == "1":
         party_size, target_date = ask_booking_basics(config)
@@ -502,9 +562,8 @@ def cmd_interactive(args):
             target_date.isoformat(), target_date.isoformat(), party_size, channel_code
         ).get(target_date.isoformat(), [])
         print(f"Lista d'attesa - {target_date.isoformat()}: {', '.join(standby) or 'nessuno slot libero'}")
-        return
 
-    if choice == "2":
+    elif choice == "2":
         party_size, target_date = ask_booking_basics(config)
         time_str = ask("Orario (HH:MM)")
         contact = ask_contact(config)
@@ -514,17 +573,24 @@ def cmd_interactive(args):
               f"+{contact['mobile_country_code']}{contact['mobile']}")
         if not ask_yes_no("\nConfermi l'iscrizione REALE alla lista d'attesa?", False):
             print("Annullato, nessuna richiesta inviata.")
-            return
-        customer = resdiary.build_customer(contact)
-        result = resdiary.add_to_standby_list(
-            target_date.isoformat(), time_str, party_size, channel_code, customer,
-            special_requests=contact.get("special_requests", ""),
-        )
-        booking = result.get("Booking", {})
-        print(f"\nEsito: {result.get('Status')} - riferimento {booking.get('Reference')} - errori: {result.get('Errors')}")
-        return
+            summary = "Iscrizione alla lista d'attesa annullata dall'utente, nessuna richiesta inviata."
+        else:
+            try:
+                customer = resdiary.build_customer(contact)
+                result = resdiary.add_to_standby_list(
+                    target_date.isoformat(), time_str, party_size, channel_code, customer,
+                    special_requests=contact.get("special_requests", ""),
+                )
+                booking = result.get("Booking", {})
+                summary = (
+                    f"Esito iscrizione lista d'attesa: {result.get('Status')} - "
+                    f"riferimento {booking.get('Reference')} - errori: {result.get('Errors')}"
+                )
+            except Exception:
+                summary = f"Iscrizione alla lista d'attesa fallita:\n{traceback.format_exc()}"
+            print(f"\n{summary}")
 
-    if choice == "3":
+    elif choice == "3":
         party_size, target_date = ask_booking_basics(config)
         contact = ask_contact(config)
         default_times = ",".join(config["booking"]["preferred_times"])
@@ -536,14 +602,17 @@ def cmd_interactive(args):
         session_config = build_session_config(config, party_size, preferred_times, contact)
         success, message = run_once(session_config, target_date, dry_run=dry_run, headless=not headed)
         print(f"\nEsito: {message}")
-        return
+        summary = f"Esito tentativo di prenotazione: {message}"
 
-    if choice == "4":
+    elif choice == "4":
         print("\nAvvio l'attesa della mezzanotte di stanotte (equivalente a 'python bot.py run') ...")
-        cmd_run(args)
-        return
+        cmd_run(args)  # sends its own detailed email (message, screenshot, HAR, log)
 
-    print("Scelta non valida.")
+    else:
+        print("Scelta non valida.")
+
+    if summary is not None:
+        send_email(config, "Trippa bot - sessione interattiva", summary, [_current_log_path])
 
 
 def cmd_inspect(args):
@@ -608,7 +677,7 @@ def main():
 
     args = parser.parse_args()
     command = args.command or "interactive"
-    {
+    func = {
         "interactive": cmd_interactive,
         "run": cmd_run,
         "attempt": cmd_attempt,
@@ -616,7 +685,10 @@ def main():
         "check": cmd_check,
         "availability": cmd_availability,
         "standby": cmd_standby,
-    }[command](args)
+    }[command]
+
+    with log_session(command):
+        func(args)
 
 
 if __name__ == "__main__":

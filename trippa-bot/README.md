@@ -38,6 +38,18 @@ explicit confirmation before actually joining the waitlist.
 mode only overrides the per-booking fields (who/when/how many) for that
 one session, it doesn't write anything back to the file.
 
+## Every run keeps a full log
+
+Every command (`run`, `attempt`, `standby`, `interactive`, ...) mirrors
+everything it prints - including full tracebacks on errors - into
+`logs/<command>_<timestamp>.log`. If something fails and you're not sure
+why, just grab that file and send it over for debugging; you don't need to
+copy-paste terminal output or remember exactly what happened.
+
+`run`/`attempt`/`standby` also attach their log automatically to the
+result email, alongside the screenshot and HAR capture, so you get it even
+without going to look at the `logs/` folder yourself.
+
 ## The real booking API
 
 Thanks to a HAR capture, `resdiary.py` now talks directly to Trippa's actual
@@ -267,7 +279,7 @@ difference between a table and nothing.
 - Automated booking may not be something the restaurant's booking platform
   explicitly endorses; use your own judgment about whether that's fine for
   an occasional personal booking.
-- HAR files in `captures/` (and the emails they get attached to) contain
-  your real name, email, and phone number once a booking form gets filled
-  in - they're already gitignored, but don't paste their contents anywhere
-  public either.
+- HAR files in `captures/` and logs in `logs/` (and the emails they get
+  attached to) contain your real name, email, and phone number once a
+  booking form gets filled in - they're already gitignored, but don't
+  paste their contents anywhere public either.
