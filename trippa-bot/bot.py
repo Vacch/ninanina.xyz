@@ -415,6 +415,137 @@ def cmd_standby(args):
     print(f"Status: {result.get('Status')}, reference: {booking.get('Reference')}, errors: {result.get('Errors')}")
 
 
+def ask(prompt_text: str, default: str | None = None) -> str:
+    suffix = f" [{default}]" if default not in (None, "") else ""
+    while True:
+        value = input(f"{prompt_text}{suffix}: ").strip()
+        if value:
+            return value
+        if default is not None:
+            return default
+        print("  Campo obbligatorio.")
+
+
+def ask_int(prompt_text: str, default: int) -> int:
+    while True:
+        value = ask(prompt_text, str(default))
+        try:
+            return int(value)
+        except ValueError:
+            print("  Inserisci un numero.")
+
+
+def ask_date(prompt_text: str, default: str | None = None) -> date:
+    while True:
+        value = ask(prompt_text, default)
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            print("  Formato data non valido, usa YYYY-MM-DD.")
+
+
+def ask_yes_no(prompt_text: str, default: bool) -> bool:
+    hint = "S/n" if default else "s/N"
+    value = input(f"{prompt_text} [{hint}]: ").strip().lower()
+    if not value:
+        return default
+    return value in ("s", "si", "sì", "y", "yes")
+
+
+def ask_contact(config: dict) -> dict:
+    """Ask who the booking is for - defaults to whatever's in config.yaml,
+    but every field can be overridden, so you can book on someone else's
+    behalf without touching any file."""
+    existing = config.get("contact", {})
+    print("\nA nome di chi vuoi prenotare? (invio per confermare il valore tra parentesi)")
+    return {
+        "first_name": ask("Nome", existing.get("first_name")),
+        "surname": ask("Cognome", existing.get("surname")),
+        "mobile_country_code": ask("Prefisso cellulare (senza +)", existing.get("mobile_country_code", "39")),
+        "mobile": ask("Cellulare (senza prefisso)", existing.get("mobile")),
+        "email": ask("Email", existing.get("email")),
+        "special_requests": ask("Richieste speciali", existing.get("special_requests", "")),
+    }
+
+
+def ask_booking_basics(config: dict) -> tuple:
+    party_size = ask_int("Numero di persone", config["booking"]["party_size"])
+    target_date = ask_date("Data (YYYY-MM-DD)")
+    return party_size, target_date
+
+
+def build_session_config(config: dict, party_size: int, preferred_times: list, contact: dict) -> dict:
+    """A copy of config with just this session's party size/times/contact
+    swapped in, so run_once()/resdiary calls can be reused unchanged."""
+    session = dict(config)
+    session["booking"] = {**config["booking"], "party_size": party_size, "preferred_times": preferred_times}
+    session["contact"] = contact
+    return session
+
+
+def cmd_interactive(args):
+    config = load_config()
+    channel_code = config["booking"].get("channel_code", "INGLESE")
+
+    print("=== Trippa Booking Bot - modalità interattiva ===")
+    print("1) Controlla la disponibilità reale (sola lettura)")
+    print("2) Iscriviti alla lista d'attesa (azione REALE)")
+    print("3) Prova/esegui una prenotazione per una data già aperta (via browser)")
+    print("4) Aspetta la mezzanotte di stanotte e prova a prenotare (come 'run')")
+    choice = ask("\nScegli un'opzione", "1")
+
+    if choice == "1":
+        party_size, target_date = ask_booking_basics(config)
+        times = resdiary.available_times(target_date.isoformat(), party_size, channel_code)
+        print(f"\nPrenotazione diretta - {target_date.isoformat()}: {', '.join(times) or 'nessuno slot libero'}")
+        standby = resdiary.standby_dates_in_range(
+            target_date.isoformat(), target_date.isoformat(), party_size, channel_code
+        ).get(target_date.isoformat(), [])
+        print(f"Lista d'attesa - {target_date.isoformat()}: {', '.join(standby) or 'nessuno slot libero'}")
+        return
+
+    if choice == "2":
+        party_size, target_date = ask_booking_basics(config)
+        time_str = ask("Orario (HH:MM)")
+        contact = ask_contact(config)
+        print("\nRiepilogo:")
+        print(f"  {target_date.isoformat()} {time_str}, {party_size} persone")
+        print(f"  {contact['first_name']} {contact['surname']} - {contact['email']} - "
+              f"+{contact['mobile_country_code']}{contact['mobile']}")
+        if not ask_yes_no("\nConfermi l'iscrizione REALE alla lista d'attesa?", False):
+            print("Annullato, nessuna richiesta inviata.")
+            return
+        customer = resdiary.build_customer(contact)
+        result = resdiary.add_to_standby_list(
+            target_date.isoformat(), time_str, party_size, channel_code, customer,
+            special_requests=contact.get("special_requests", ""),
+        )
+        booking = result.get("Booking", {})
+        print(f"\nEsito: {result.get('Status')} - riferimento {booking.get('Reference')} - errori: {result.get('Errors')}")
+        return
+
+    if choice == "3":
+        party_size, target_date = ask_booking_basics(config)
+        contact = ask_contact(config)
+        default_times = ",".join(config["booking"]["preferred_times"])
+        raw_times = ask("Orari preferiti in ordine, separati da virgola", default_times)
+        preferred_times = [t.strip() for t in raw_times.split(",") if t.strip()]
+        dry_run = ask_yes_no("\nModalità prova (non invia la conferma finale)?", True)
+        headed = ask_yes_no("Mostrare il browser mentre lavora?", True)
+
+        session_config = build_session_config(config, party_size, preferred_times, contact)
+        success, message = run_once(session_config, target_date, dry_run=dry_run, headless=not headed)
+        print(f"\nEsito: {message}")
+        return
+
+    if choice == "4":
+        print("\nAvvio l'attesa della mezzanotte di stanotte (equivalente a 'python bot.py run') ...")
+        cmd_run(args)
+        return
+
+    print("Scelta non valida.")
+
+
 def cmd_inspect(args):
     config = load_config()
     HAR_DIR.mkdir(exist_ok=True)
@@ -435,7 +566,12 @@ def cmd_inspect(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command", required=False)
+
+    sub.add_parser(
+        "interactive",
+        help="Ask questions in the terminal instead of editing files - the default with no arguments.",
+    )
 
     sub.add_parser("run", help="Wait for the unlock moment, then attempt the booking for real.")
 
@@ -471,14 +607,16 @@ def main():
     p_standby.add_argument("--yes", action="store_true", help="Confirm you want to really do this.")
 
     args = parser.parse_args()
+    command = args.command or "interactive"
     {
+        "interactive": cmd_interactive,
         "run": cmd_run,
         "attempt": cmd_attempt,
         "inspect": cmd_inspect,
         "check": cmd_check,
         "availability": cmd_availability,
         "standby": cmd_standby,
-    }[args.command](args)
+    }[command](args)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,36 @@ days ahead. The bot wakes up right before each midnight, and the instant the
 window rolls over, works through a priority list of times for that one new
 date until one is booked, then emails you the result.
 
+## Interactive mode
+
+You don't have to edit `config.yaml` for every booking. Just run it with no
+arguments (or `python bot.py interactive`) and it asks you questions in the
+terminal instead:
+
+```bash
+python bot.py
+```
+
+```
+=== Trippa Booking Bot - modalità interattiva ===
+1) Controlla la disponibilità reale (sola lettura)
+2) Iscriviti alla lista d'attesa (azione REALE)
+3) Prova/esegui una prenotazione per una data già aperta (via browser)
+4) Aspetta la mezzanotte di stanotte e prova a prenotare (come 'run')
+```
+
+Option 2 (the one that actually works end-to-end today, see below) asks
+for party size, date, time, and **who the booking is for** - name,
+surname, mobile, email - pre-filled from `config.yaml` as defaults but
+fully overridable, so booking for a friend or relative is just typing
+different answers, no file editing needed. It shows a summary and asks for
+explicit confirmation before actually joining the waitlist.
+
+`config.yaml` is still used as the source of the *stable* settings
+(SMTP, channel_code, closed days, offset, `run`'s schedule) - interactive
+mode only overrides the per-booking fields (who/when/how many) for that
+one session, it doesn't write anything back to the file.
+
 ## The real booking API
 
 Thanks to a HAR capture, `resdiary.py` now talks directly to Trippa's actual
@@ -160,6 +190,7 @@ export TRIPPA_BOT_SMTP_PASSWORD="your-16-char-app-password"
 ## Usage
 
 ```bash
+python bot.py                                  # interactive mode, asks questions (see above)
 python bot.py inspect                          # find real selectors, HAR always recorded
 python bot.py availability --date 2026-07-27   # check real availability, no browser
 python bot.py standby --date ... --time ... --yes  # really join the waitlist
